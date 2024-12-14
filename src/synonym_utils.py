@@ -1,4 +1,5 @@
 import json
+from src.linguistic_utils import get_normal_form
 
 
 def read_and_process_synonym_dict(path_to_dict):
@@ -56,3 +57,21 @@ def remove_bad_synonyms(synonym_dict):
     for word, bad_synonym in bad_synonyms_to_remove:
         if word in synonym_dict and bad_synonym in synonym_dict[word]:
             synonym_dict[word].remove(bad_synonym)
+
+
+def get_all_synonyms(word, synonym_dict):
+    normal_form = get_normal_form(word)
+
+    if word in synonym_dict:
+        return synonym_dict[word]
+    elif normal_form in synonym_dict:
+        return synonym_dict[normal_form]
+    else:
+        return []
+
+
+def prepare_synonym_dict(path_to_synonym_dict):
+    synonym_dict = read_and_process_synonym_dict(path_to_synonym_dict)
+    synonym_dict = remove_bad_parsed_synonyms(synonym_dict)
+    remove_bad_synonyms(synonym_dict)
+    return synonym_dict
