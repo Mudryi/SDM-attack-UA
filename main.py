@@ -3,13 +3,10 @@ import logging
 from typing import List
 from pydantic import BaseModel
 import tqdm
-from tqdm import trange
 import string
 import random
 
 import numpy as np
-import numpy as np
-import sys
 import json
 
 import torch
@@ -26,12 +23,14 @@ from datasets import load_dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoModel, AdamW
 from transformers import WEIGHTS_NAME, CONFIG_NAME
 
+from src.synonym_utils import remove_bad_synonyms, remove_bad_parsed_synonyms, read_and_process_synonym_dict
+
+
 nltk.download('averaged_perceptron_tagger')
 nltk.download('universal_tagset')
 
 morph = pymorphy2.MorphAnalyzer(lang='uk')
 
-# gdown https://drive.google.com/uc?id=1QNu6FCGa_uf3ZnvzdlhI2fZUNsSyj20L
 mode = 'train'  # "eval"
 
 NET_CONFIG = 'net.pkl'
@@ -55,59 +54,13 @@ perturb_ratio = 0.4
 max_seq_length = 128 * 2
 
 
-def read_and_process_synonym_dict(path_to_dict):
-    with open(path_to_dict, 'r', encoding='utf-8') as file:
-        dict_ = json.load(file)
-
-    dict_processed = {}
-    for i in dict_:
-        if len(i["synsets"]) == 0:
-            continue
-
-        if i["lemma"].lower() in dict_processed:
-            for synset in i["synsets"]:
-                dict_processed[i["lemma"].lower()].extend(synset["clean"])
-        else:
-            dict_processed[i["lemma"].lower()] = []
-
-            for synset in i["synsets"]:
-                dict_processed[i["lemma"].lower()].extend(synset["clean"])
-
-        dict_processed[i["lemma"].lower()] = list(set(dict_processed[i["lemma"].lower()]))
-    return dict_processed
-
 
 path_to_ulif = 'synonyms_dictionaries/synonimy_info_clean.json'  # TODO: change dict
 synonym_dict = read_and_process_synonym_dict(path_to_ulif)
+synonym_dict = remove_bad_parsed_synonyms(synonym_dict)
+remove_bad_synonyms(synonym_dict)
 
-synonym_dict["чоловік"].remove("жінка")
-synonym_dict["жінка"].remove("чоловік")
-synonym_dict["місце"].remove("ід")
 
-synonym_dict["стояти"].remove("клячати")
-synonym_dict["грати"].remove("зображати")
-synonym_dict["люди"].remove("мир")
-synonym_dict["смугастий"].remove("із смугами")
-synonym_dict["сонце"].remove("приязнь")
-synonym_dict["вода"].remove("курорт")
-synonym_dict["чоловік"].remove("подружжя")
-synonym_dict["чоловік"].remove("дружина")
-synonym_dict['хлопець'].remove('дівчина')
-synonym_dict['білий'].remove('чорний')
-synonym_dict['рука'].remove('у десна')
-synonym_dict['сидіти'].remove('проживати')
-synonym_dict['сидіти'].remove('(на')
-synonym_dict['молодий'].remove('старий')
-
-remove_list = ["пестл", "розм", "від", "за", "жм", "як зв", "жарт", "тйж-ба"]
-for key in synonym_dict:
-    synonym_dict[key] = [word for word in synonym_dict[key] if word not in remove_list]
-
-logging.basicConfig(level=logging.INFO,
-                    format='\033[1;36m%(asctime)s %(filename)s\033[0m \033[1;33m[line:%(lineno)d] \033[0m'
-                           '%(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %A %H:%M:%S',
-                    force=True)
 
 
 def info(msg: str):
@@ -171,12 +124,6 @@ class ClassificationItem(BaseModel):
 
 
 class Discriminator(nn.Module):
-    """决策器模型
-
-    Args:
-        torch (_type_): 实现对序列的多分类 长度为n则分为 n类 最大的那个作为决策删除
-    """
-
     def __init__(self, checkpoint: str = None) -> None:
         super().__init__()
         self.hidden_size = 768
@@ -184,7 +131,7 @@ class Discriminator(nn.Module):
         self.model = None
         self.linear = nn.Linear(self.hidden_size * 2, 1)  # 长度为n的概率  需要尾部增加相同长度 0, 1 编码
         if checkpoint is None:
-            info(f"load model from bert-base-uncased")
+            info("load model from bert-base-uncased")
             self.model = AutoModel.from_pretrained('bert-base-uncased').to('cuda')
         else:
             info(f"load model from {checkpoint}")
@@ -209,10 +156,10 @@ class Discriminator(nn.Module):
         import os
         folder = os.path.exists(checkpoint)
 
-        info(f"保存模型至 {checkpoint}")
+        info(f"Model saved: {checkpoint}")
         if not folder:
             os.makedirs(checkpoint)
-        info(f"保存PLM...")
+        info("PLM...")
         torch.save(self.model.state_dict(), f"{checkpoint}/{WEIGHTS_NAME}")
         self.model.config.to_json_file(f"{checkpoint}/{CONFIG_NAME}")
         info('\t保存PyTorch网络参数')
@@ -437,14 +384,6 @@ class AttackClassification:
         return syn_copy[slices[0]]  # 在对应标签上最低的
 
     def do_discrimination(self, state, word2token, logits):
-        """进行一次判别
-        根据pool生成state_info
-        Args:
-            words (_type_): _description_
-            pool (_type_): _description_
-            返回要修改的word index
-        """
-
         token_index_list = []
         token_index_p = []
         # 寻找state 为 1 里面 logits最大的
@@ -713,20 +652,40 @@ class AttackClassification:
             self.discriminator.saveModel(self.checkpoint)
 
 
-a = AttackClassification(dataset_path,
-                         num_labels,
-                         target_model_path,
-                         counter_fitting_embeddings_path,
-                         counter_fitting_cos_sim_path,
-                         output_dir,
-                         output_json,
-                         sim_score_threshold,
-                         synonym_num,
-                         perturb_ratio,
-                         discriminator_checkpoint,
-                         mode)
+def main(args):
+    logging.basicConfig(level=logging.INFO,
+                        format='\033[1;36m%(asctime)s %(filename)s\033[0m \033[1;33m[line:%(lineno)d] \033[0m'
+                               '%(levelname)s %(message)s',
+                        datefmt='%Y-%m-%d %A %H:%M:%S',
+                        force=True)
 
-a.mode = 'train'
-data = a.read_data(target_col='label')
+    a = AttackClassification(dataset_path,
+                             num_labels,
+                             target_model_path,
+                             counter_fitting_embeddings_path,
+                             counter_fitting_cos_sim_path,
+                             output_dir,
+                             output_json,
+                             sim_score_threshold,
+                             synonym_num,
+                             perturb_ratio,
+                             discriminator_checkpoint,
+                             mode)
 
-a.run()
+    a.mode = 'train'
+    a.run()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Adversarial Attack on Ukrainian Language Models")
+    parser.add_argument("--model_name", type=str, required=True,
+                        help="Name of the pre-trained language model (e.g., bert-base-uk).")
+    parser.add_argument("--synonym_dict_path", type=str, required=True, help="Path to the synonym dictionary file.")
+    parser.add_argument("--input_text", type=str, required=True, help="Input text to attack.")
+    parser.add_argument("--ground_truth", type=str, required=True, help="Ground truth label for the input text.")
+    parser.add_argument("--max_steps", type=int, default=10, help="Maximum steps for the adversarial attack.")
+    parser.add_argument("--output_path", type=str, help="Path to save the attack results.")
+
+    args = parser.parse_args()
+    main(args)
+
