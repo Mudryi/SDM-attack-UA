@@ -2,6 +2,7 @@ from typing import List
 import random
 import string
 import json
+import os
 
 import tqdm
 
@@ -14,16 +15,112 @@ from datasets import load_dataset
 
 import stanza
 import nltk
-
+import re
 
 from src.logging_utils import info
 from src.data_schemas import ClassificationItem
 from src.data_utils import read_corpus
 from src.stop_words import ukr_stop_words
 from src.synonym_utils import get_all_synonyms, prepare_synonym_dict
+from src.resources import morph
 
 from attack.discriminator import Discriminator
 
+
+def get_correct_parsed_result(parsing_results, target_pos, target_gender=None):
+
+    for result in parsing_results:
+        if result.tag.POS == target_pos and target_gender and result.tag.gender == target_gender:
+            return result
+
+    for result in parsing_results:
+        if result.tag.POS == target_pos:
+            return result
+
+    return None
+
+def lower_grammar_restrictions(grammemes, target_gender):
+    grammemes_to_remove = [str(target_gender), 'Refl']
+    
+    new_grammemes = set(item for item in list(grammemes) if item not in grammemes_to_remove)
+    return new_grammemes
+
+def merge_tokens(tokens):
+    merged = ''
+    puntc_previouse = False
+
+    for token in tokens:
+        if re.match(r'[^\w\s]', token):
+            merged += token
+            if token != ',':
+                puntc_previouse = True
+        elif puntc_previouse:
+            merged += token
+            puntc_previouse = False
+        else:
+            merged += ' ' + token
+
+    return merged.strip()
+
+
+def replace_word(sentence, target, replacement):
+    target_normal = morph.parse(target)[0].normal_form
+    
+    tokens = re.findall(r'\w+|[^\w\s]', sentence)
+    
+    replaced = False
+    new_tokens = []
+
+    for i, token in enumerate(tokens):
+        target_gender = None
+        
+        if re.match(r'\w+', token):
+            parsed_word = morph.parse(token)[0]
+            
+            if parsed_word.normal_form == target_normal:
+                case_and_number_grammemes = parsed_word.tag.grammemes
+                target_pos = parsed_word.tag.POS
+
+                if target_pos == 'NOUN':
+                    target_gender = parsed_word.tag.gender
+
+                replacement_parsed = morph.parse(replacement)
+                matched_replacement = get_correct_parsed_result(replacement_parsed, target_pos, target_gender)
+                # print(matched_replacement)
+                # print(case_and_number_grammemes)
+
+                if matched_replacement:
+                    replacement_word = matched_replacement.inflect(case_and_number_grammemes)
+                else:
+                    # print('bad match')
+                    return None
+            
+                if replacement_word:
+                    replacement_word = replacement_word.word
+                else:
+                    case_and_number_grammemes = lower_grammar_restrictions(case_and_number_grammemes, target_gender)
+                    replacement_word = matched_replacement.inflect(case_and_number_grammemes)
+                    if replacement_word:
+                        replacement_word = replacement_word.word
+                    else:
+                        # print('bad inflect')
+                        return None
+                
+
+                if token.istitle():
+                    replacement_word = replacement_word.capitalize()
+                
+                new_tokens.append(replacement_word)
+                replaced = True
+            else:
+                new_tokens.append(token)
+        else:
+            new_tokens.append(token)
+    
+    if not replaced:
+        return None
+    
+    return merge_tokens(new_tokens)
 
 class AttackClassification:
     def __init__(self,
@@ -63,7 +160,7 @@ class AttackClassification:
         self.stop_words = None
         self.get_stopwords()
 
-        self.discriminator = Discriminator(info)
+        self.discriminator = Discriminator()
 
         # 其他参数
         self.output_file = f"{output_dir}/{output_json}"
@@ -206,15 +303,26 @@ class AttackClassification:
         syn_copy = []
 
         for s in syn:
-
+            text = replace_word(" ".join(words[1:-1]),
+                                         word,
+                                         s[0])
+            if text is None:
+                continue
+            texts.append(text)
+            syn_copy.append(s)
+            
             item = words[max(1, index - 50): index] + [s[0]] + words[index + 1: min(len(words) - 1, index + 50)]
             # item = words[1: index] + [s[0]] + words[index+1: -1]
             # adv_pos = self.check_pos(item)
             adv_pos = org_pos
             if adv_pos[index] == org_pos[index] or ({adv_pos[index], org_pos[index]} <= {'NOUN', 'VERB'}):
-                text = " ".join(item)
-                texts.append(text)
-                syn_copy.append(s)
+                text_old = " ".join(item)
+            # print(text)
+            # print(text_old)
+
+            # #     texts.append(text)
+            # #     syn_copy.append(s)
+
         if len(texts) == 0:
             return None
         probability = None
@@ -433,10 +541,14 @@ class AttackClassification:
         perturb = 0.0
         ans = []
         attack_func = self.attack
+
         if self.mode == 'eval':
             self.discriminator = Discriminator(self.checkpoint)
             self.discriminator.eval()
             attack_func = self.attack_eval
+        
+        os.makedirs(os.path.dirname(self.output_file), exist_ok=True)
+
         for i, item in enumerate(bar):
             try:
                 res = attack_func(item, 50)
@@ -457,6 +569,7 @@ class AttackClassification:
                                  'attack_rate': perturb_total / attack_total})
             if i % 100 == 0 and self.mode == 'train':
                 self.discriminator.saveModel(self.checkpoint)
+
             if i % 500 == 0 and self.mode == 'train':
                 json.dump(ans, open(self.output_file, 'w'))
 

@@ -2,7 +2,7 @@ import random
 import re
 import string
 
-from stop_words import ukr_stop_words
+from src.stop_words import ukr_stop_words
 
 
 def clean_string(input_string):

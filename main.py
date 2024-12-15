@@ -6,8 +6,8 @@ from config import config
 from attack.attack_classification import AttackClassification
 
 
-nltk.download('averaged_perceptron_tagger')
-nltk.download('universal_tagset')
+# nltk.download('averaged_perceptron_tagger')
+# nltk.download('universal_tagset')
 
 
 def main():

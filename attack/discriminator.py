@@ -8,7 +8,7 @@ from src.logging_utils import info, finish
 
 
 class Discriminator(nn.Module):
-    def __init__(self, checkpoint) -> None:
+    def __init__(self, checkpoint: str = None) -> None:
         super().__init__()
         self.NET_CONFIG = 'net.pkl'
         self.hidden_size = 768
